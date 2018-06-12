@@ -1,8 +1,8 @@
 # Site settings
-title: Hux Blog
+title: Wansuiye Blog
 SEOTitle: 博客 | Wansuiye Blog
 header-img: img/home-bg.jpg
-email: huxpro@gmail.com
+email: h
 description: "关于中间件、微服务架构、容器 | walking in life"
 url: "https://wansuiye.github.io"              # your host, for absolute URL
 baseurl: ""                             # for example, '/blog' if your blog hosted on 'host/blog'
@@ -11,11 +11,11 @@ baseurl: ""                             # for example, '/blog' if your blog host
 
 # SNS settings
 RSS: false
-weibo_username:     xxx
-zhihu_username:     xxx
-github_username:    xxx
-twitter_username:   xxx
-#facebook_username:  huxpro
+#weibo_username:     xxx
+#zhihu_username:     xxx
+github_username:    wansuiye
+#twitter_username:   xxx
+#facebook_username:  pro
 # linkedin_username:  firstname-lastname-idxxxx
 
 
@@ -47,7 +47,7 @@ kramdown:
 
 
 # Disqus settings
-disqus_username: hux
+disqus_username: wansuiye
 
 # Netease setttings
 netease_comment: false
@@ -55,7 +55,7 @@ netease_comment: false
 
 
 # Analytics settings
-# Baidu Analytics 
+# Baidu Analytics
 # ba_track_id: [your track id]
 
 # Google Analytics

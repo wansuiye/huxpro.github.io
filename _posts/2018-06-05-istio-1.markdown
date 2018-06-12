@@ -1,0 +1,260 @@
+---
+layout:     post
+title:      "Istio 几个概念"
+date:       2018-06-05 17:00:00
+author:     "Wansuiye"
+header-img: "img/post-bg-nextgen-web-pwa.jpg"
+header-mask: 0.3
+catalog:    true
+tags:
+    - service mesh
+    - gateway
+---
+
+>
+
+ingress 配置流量规则时，gateways是配置的ingress gateway，该规则只对通过该gateway的流量生效，如果希望其他内部服务请求也生效则在gateways列表添加mesh。
+使用新的api的原因是当用于数以千计的服务、或者协议不是http、使用k8s ingress 导致很多不足
+重新设计的关键准则是
+- 模型基础设施更加明确，例如，除了配置入gateway之外，还可以指定实现它的组件(控制器)。
+- 创作模型应该是“面向生产者”和“以主机为中心”，而不是组合，例如，与特定主机关联的所有规则都是一起配置的，而不是单独配置的。
+- 明确路由与路由后行为的分离。
+- 一个典型的网格将有一个或多个负载均衡器(我们称之为网关)，这些负载均衡器可以终止外部网络的TLS并允许通信进入网格。然后，流量通过sidecar网关通过内部服务。应用程序使用外部服务(例如谷歌Maps API)也很常见。这些可能被直接调用，或者在某些部署中，所有离开网格的流量都可能被强制通过专用的出口网关。下图描述了这个心理模型。
+![image](/img/in-post/post-istio-1/gateways.png.jpeg)
+考虑到上述设置，v1alpha3引入了以下新的配置资源，用于控制进入、在内部和退出网格的通信路由。
+- Gateway
+- VirtualService
+- DestinationRule
+- ServiceEntry
+gateway是一个独立于平台的抽象，用于为流入专用的中间件的流量建模。
+下图描述了跨配置资源的控制流。
+![image](/img/in-post/post-istio-1/relationship-between-vi-v3.png.jpeg)
+## gateway
+描述一个负载均衡器，在接收传入或传出的HTTP/TCP连接的网格边缘运行。该规范描述了应该公开的一组端口、使用的协议类型、负载均衡器的SNI配置等。
+网关为HTTP/TCP流量配置负载均衡器，而不管它将在何处运行。网格中可以存在任意数量的网关，多个不同的网关实现可以共存。事实上，网关配置可以通过指定工作负载(pod)标签集作为配置的一部分来绑定到特定的工作负载，允许用户通过编写一个简单的网关控制器来重用现有的网络设备。
+对于ingress流量管理，您可能会问:为什么不重用Kubernetes ingress api ?ingress api被证明无法表达Istio的路由需求。通过尝试在不同的HTTP代理之间绘制共同的分母，Ingress只能支持最基本的HTTP路由，并最终将现代代理的所有其他特性推入非可移植的注解。
+
+Istio网关通过将L4-L6规范与L7分离来克服入口缺陷。它只配置L4-L6函数(例如，要公开的端口、TLS配置)，这些函数由所有优秀的L7代理统一实现。然后，用户可以使用标准的Istio规则通过绑定虚拟服务来控制进入网关的HTTP请求和TCP流量。
+
+例如，下面简单的gateway配置了一个负载均衡器来允许外部流量通过bookinfo.com域名进入mesh内部
+
+```
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: bookinfo-gateway
+spec:
+  servers:
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    hosts:
+    - bookinfo.com
+    tls:
+      mode: SIMPLE
+      serverCertificate: /tmp/tls.crt
+      privateKey: /tmp/tls.key
+```
+
+为了配置相应的规则，需要使用相同的hosts配置virtual service，且通过配置gateways来限制该rule仅用于gateway
+
+```
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: bookinfo
+spec:
+  hosts:
+    - bookinfo.com
+  gateways:
+  - bookinfo-gateway # <---- bind to gateway
+  http:
+  - match:
+    - uri:
+        prefix: /reviews
+    route:
+    ...
+```
+
+网关可用于建模一个边缘代理或一个纯粹的内部代理，如第一个图所示。不管位置如何，所有网关都可以以相同的方式配置和控制。
+## virtual service
+用“虚拟服务”替换路由规则乍一看可能有些奇怪，但实际上，对于正在配置的内容来说，它是一个更好的名称，尤其是在重新设计API以解决之前模型的可伸缩性问题之后。
+
+实际上,唯一的变化是,不使用一组独立的配置资源(规则)为特定目的服务配置路由,这些独立的规则每个都包含一个优先级字段控制评估的顺序,我们现在配置(virtual)目的地本身,与它的所有规则有序列表中相应的VirtualService资源。例如，之前我们为Bookinfo应用程序的评估服务提供了两个路由资源，如下所示:
+
+```
+apiVersion: config.istio.io/v1alpha2
+kind: RouteRule
+metadata:
+  name: reviews-default
+spec:
+  destination:
+    name: reviews
+  precedence: 1
+  route:
+  - labels:
+      version: v1
+---
+apiVersion: config.istio.io/v1alpha2
+kind: RouteRule
+metadata:
+  name: reviews-test-v2
+spec:
+  destination:
+    name: reviews
+  precedence: 2
+  match:
+    request:
+      headers:
+        cookie:
+          regex: "^(.*?;)?(user=jason)(;.*)?$"
+  route:
+  - labels:
+      version: v2
+```
+
+现在使用一个virtual service配置如下
+
+```
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: reviews
+spec:
+  hosts:
+    - reviews
+  http:
+  - match:
+    - headers:
+        cookie:
+          regex: "^(.*?;)?(user=jason)(;.*)?$"
+    route:
+    - destination:
+        host: reviews
+        subset: v2
+  - route:
+    - destination:
+        host: reviews
+        subset: v1
+```
+
+正如您所看到的，review服务的两个规则都被合并到一个地方，这在一开始可能是更好的，也可能不是更好的。但是，如果您仔细观察这个新模型，您将看到v1alpha3的功能有一些根本的差异，极大扩充了功能。
+
+首先，请注意使用一个hosts字段(实际上是重复字段)指定虚拟化服务的目标服务，然后在每个路由规范的目标字段中再次指定。这与以前的模型有一个非常重要的区别。
+
+虚拟服务描述一个或多个用户可寻址目的地与网格中的实际目标工作负载之间的映射。在我们的示例中，它们是相同的，但是，用户地址的主机可以是任何带有可选通配符前缀或CIDR前缀的DNS名称，这些前缀或前缀将用于处理服务。这对于将单一组件转换为由不同的微服务构建的复合服务特别有用，而不需要服务的使用者适应转换。
+例如，下面的规则允许用户同时处理Bookinfo应用程序的评论和评级服务，就好像它们是http://bookinfo.com/上的大型(虚拟)服务的一部分一样:
+
+```
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: bookinfo
+spec:
+  hosts:
+    - bookinfo.com
+  http:
+  - match:
+    - uri:
+        prefix: /reviews
+    route:
+    - destination:
+        host: reviews
+  - match:
+    - uri:
+        prefix: /ratings
+    route:
+    - destination:
+        host: ratings
+  ...
+```
+
+虚拟服务的主机实际上不必是服务注册中心的一部分，它们只是虚拟目的地。这允许用户为网格中没有可路由条目的虚拟主机建模流量。通过将VirtualService绑定到同一主机的网关配置(如前一节所述)，可以在网格之外公开这些主机。
+
+除了这个基本的重构之外，虚拟服务还包括其他几个重要的更改:
+
+- 可以在VirtualService配置中表示多个匹配条件，减少了冗余规则的需要。
+- 每个服务版本都有一个名称(称为服务子集)。属于子集的pod /VMs的集合在DestinationRule中定义，在下一节中进行描述。
+- 可以使用通配符DNS前缀为所有匹配服务创建一条规则来指定虚拟服务主机。例如，在Kubernetes中，要为foo名称空间中的所有服务应用相同的重写规则，虚拟服务将使用\*.foo.svc.cluster,本地主机。
+
+## destination rule
+定义在路由发生后应用于服务的策略。这些规则指定了负载平衡的配置、来自sidecar的连接池大小和异常值检测设置，以从负载平衡池中检测和驱逐不健康的主机。
+DestinationRule配置了将流量转发到服务时要应用的策略集合。它们打算由服务所有者编写，描述断路器、负载平衡器设置、TLS设置等。命运规则destionrule或多或少与它的前身destationpolicy相同，但有以下例外:
+- DestinationRule的主机可以包含通配符前缀，允许为许多实际服务指定单个规则。
+- DestinationRule定义可寻址的子集(例如。，命名版本)对应的目标主机。在将流量发送到服务的特定版本时，这些子集用于virtual service路由规范。以这种方式命名版本允许我们在不同的virtual service中清晰地引用它们，简化Istio代理发出的统计信息，并在SNI header中编码子集。
+为评审服务配置策略和子集的DestinationRule可能是这样的:
+
+```
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: reviews
+spec:
+  host: reviews
+  trafficPolicy:
+    loadBalancer:
+      simple: RANDOM
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+  - name: v2
+    labels:
+      version: v2
+    trafficPolicy:
+      loadBalancer:
+        simple: ROUND_ROBIN
+  - name: v3
+    labels:
+      version: v3
+```
+
+注意，与DestinationPolicy不同，在单个DestinationRule配置中指定了多个策略(例如，default和v2-specific)。
+## service entry
+ServiceEntry用于向Istio在内部维护的服务注册中心添加附加条目。最常用的方法是允许对网格的外部依赖关系(如从web消费的api)进行流量建模，或者对遗留基础设施中的服务进行流量建模。
+
+您以前可以使用EgressRule配置的所有内容都可以通过ServiceEntry轻松地完成。例如，从网格内部访问一个简单的外部服务可以使用这样的配置来启用:
+
+```
+apiVersion: networking.istio.io/v1alpha3
+kind: ServiceEntry
+metadata:
+  name: foo-ext
+spec:
+  hosts:
+  - foo.com
+  ports:
+  - number: 80
+    name: http
+    protocol: HTTP
+```
+也就是说，ServiceEntry的功能明显比它的前身多。首先，ServiceEntry不限于外部服务配置，它可以分为两种类型:mesh-internal或mesh-external。mesh -internal条目与所有其他内部服务类似，但用于显式地向网格添加服务。它们可以作为扩展服务网格的一部分添加服务，以包括非托管基础设施(例如，向基于kubernet的服务网格添加vm)。mesh -external条目表示网格外部的服务。对于它们，mTLS身份验证被禁用，策略强制在客户端执行，而不是在内部服务请求的通常服务器端执行。
+由于ServiceEntry配置只是向内部服务注册中心添加一个目的地，因此可以将其与virtual service和/或DestinationRule结合使用，就像注册中心中的任何其他服务一样。例如，下列DestinationRule可用于为外部服务初始化mTLS连接:
+
+```
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: foo-ext
+spec:
+  name: foo.com
+  trafficPolicy:
+    tls:
+      mode: MUTUAL
+      clientCertificate: /etc/certs/myclientcert.pem
+      privateKey: /etc/certs/client_private_key.pem
+      caCertificates: /etc/certs/rootcacerts.pem
+```
+
+除了其扩展的通用性之外，ServiceEntry还提供了一些关于EgressRule的其他改进，包括以下内容:
+- 单个ServiceEntry可以配置多个服务端点，这在以前需要多个EgressRule。
+- 端点的resolution模式现在是可配置的(无、静态或DNS)。
+- 此外，我们正在解决另一个难题:需要通过纯文本端口(例如http://google.com:443)访问安全的外部服务。这应该在未来几周内修复，允许您从应用程序直接访问https://google.com。请继续关注解决这个限制的Istio补丁发布(0.8.x)。
+Istio v1alpha3路由API比它的前任具有更多的功能，但不幸的是，它不能向后兼容，需要一次手动转换。从Istio 0.9开始，以前的配置资源(RouteRule)、取消策略和隔离策略将不受支持。Kubernetes用户可以继续使用Ingress为基本路由配置边缘负载均衡器。然而，高级路由特性(例如，跨两个版本的通信量)将需要使用网关，这是一种功能更强大且高度推荐的入口替换。
+
+### References
+
+1.<a id="ref1">[Introducing the Istio v1alpha3 routing API](https://istio.io/blog/2018/v1alpha3-routing/)</a>
+
+
